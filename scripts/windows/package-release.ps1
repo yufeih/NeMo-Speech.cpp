@@ -99,7 +99,8 @@ try {
 
     # Every imported DLL must be bundled or provided by Windows or the GPU driver.
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    $dumpbin = & $vswhere -latest -products * -find '**\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+    $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -find '**\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
     if (-not $dumpbin) { throw 'dumpbin.exe was not found (Visual Studio C++ tools are required)' }
     # A failed inspection would otherwise read as "no dependencies".
     function Invoke-Dumpbin([string]$Option, [string]$Path) {
