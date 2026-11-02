@@ -200,25 +200,18 @@ to_config(const nemo_speech_asr_recognizer_config* c) {
 }
 
 asr_core::AsrRequestOptions
-to_options(
-    const nemo_speech_asr_recognition_options* o,
-    const nemo_speech_asr_language_hints* hints = nullptr) {
+to_options(const nemo_speech_asr_recognition_options* o) {
     asr_core::AsrRequestOptions opts;
-    if (hints) {
-        if (!HAS_FIELD(hints, nemo_speech_asr_language_hints, count))
-            throw std::invalid_argument("language hints size is too small");
-        if (hints->count && !hints->languages)
-            throw std::invalid_argument("language hints languages is null");
-        for (size_t i = 0; i < hints->count; ++i) {
-            if (!hints->languages[i])
-                throw std::invalid_argument("language hint is null");
-            opts.language_hints.emplace_back(hints->languages[i]);
-        }
-        if (HAS_FIELD(hints, nemo_speech_asr_language_hints, penalty))
-            opts.language_hint_penalty = hints->penalty;
-    }
     if (!o)
         return opts;
+    if (o->language_hint_count && !o->language_hints)
+        throw std::invalid_argument("language_hints is null");
+    for (size_t i = 0; i < o->language_hint_count; ++i) {
+        if (!o->language_hints[i])
+            throw std::invalid_argument("language hint is null");
+        opts.language_hints.emplace_back(o->language_hints[i]);
+    }
+    opts.language_hint_penalty = o->language_hint_penalty;
     if (HAS_FIELD(o, nemo_speech_asr_recognition_options, max_alternatives) &&
         o->max_alternatives > 1)
         opts.max_alternatives = o->max_alternatives;
@@ -304,6 +297,7 @@ nemo_speech_asr_recognition_options_default(void) {
     std::memset(&o, 0, sizeof(o));
     o.size = sizeof(o);
     o.max_alternatives = 1;  // 1-best
+    o.language_hint_penalty = 2.0f;
     return o;
 }
 
@@ -358,15 +352,6 @@ nemo_speech_asr_status
 nemo_speech_asr_recognize_f32(
     nemo_speech_asr_recognizer* recognizer, const nemo_speech_asr_recognition_options* options,
     const float* samples, size_t n_samples, int32_t sample_rate, nemo_speech_asr_result** out) {
-    return nemo_speech_asr_recognize_f32_with_language_hints(
-        recognizer, options, nullptr, samples, n_samples, sample_rate, out);
-}
-
-nemo_speech_asr_status
-nemo_speech_asr_recognize_f32_with_language_hints(
-    nemo_speech_asr_recognizer* recognizer, const nemo_speech_asr_recognition_options* options,
-    const nemo_speech_asr_language_hints* hints, const float* samples, size_t n_samples,
-    int32_t sample_rate, nemo_speech_asr_result** out) {
     if (!recognizer || !out)
         return NEMO_SPEECH_ASR_ERROR_INVALID_ARGUMENT;
     *out = nullptr;
@@ -377,7 +362,7 @@ nemo_speech_asr_recognize_f32_with_language_hints(
         }
         auto r = std::make_unique<nemo_speech_asr_result>();
         r->value = recognizer->impl->recognize(
-            samples, n_samples, to_options(options, hints), lang_of(options), sample_rate);
+            samples, n_samples, to_options(options), lang_of(options), sample_rate);
         *out = r.release();
         return NEMO_SPEECH_ASR_OK;
     });
@@ -387,21 +372,12 @@ nemo_speech_asr_status
 nemo_speech_asr_streaming_recognize(
     nemo_speech_asr_recognizer* recognizer, const nemo_speech_asr_recognition_options* options,
     nemo_speech_asr_stream** out) {
-    return nemo_speech_asr_streaming_recognize_with_language_hints(
-        recognizer, options, nullptr, out);
-}
-
-nemo_speech_asr_status
-nemo_speech_asr_streaming_recognize_with_language_hints(
-    nemo_speech_asr_recognizer* recognizer, const nemo_speech_asr_recognition_options* options,
-    const nemo_speech_asr_language_hints* hints, nemo_speech_asr_stream** out) {
     if (!recognizer || !out)
         return NEMO_SPEECH_ASR_ERROR_INVALID_ARGUMENT;
     *out = nullptr;
     return guard([&] {
         auto h = std::make_unique<nemo_speech_asr_stream>();
-        h->impl =
-            recognizer->impl->streaming_recognize(to_options(options, hints), lang_of(options));
+        h->impl = recognizer->impl->streaming_recognize(to_options(options), lang_of(options));
         *out = h.release();
         return NEMO_SPEECH_ASR_OK;
     });

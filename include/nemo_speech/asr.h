@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-// nemo-speech: stable C ABI for ASR.
+// nemo-speech: C ABI for ASR.
 //
 // This is the installed binary contract: opaque handles, POD structs, explicit
 // ownership, no exceptions, no STL, no C++ name mangling. The C++ library
@@ -8,13 +8,6 @@
 // mirror Riva ASR (Recognize / StreamingRecognize / word time offsets / finals
 // / force_eou).
 //
-// Compatibility (v1):
-//   - Exported symbols: only nemo_speech_asr_*.
-//   - Config structs are append-only and start with `size`; a function tolerates
-//     a smaller `size` by defaulting the missing tail fields. Subsystem configs
-//     are referenced by optional pointer (NULL = defaults).
-//   - Status enum values and result accessors are append-only.
-//   - Breaking changes require a new SONAME / v2 symbols.
 #ifndef NEMO_SPEECH_ASR_H
 #define NEMO_SPEECH_ASR_H
 
@@ -213,23 +206,10 @@ typedef struct nemo_speech_asr_recognition_options {
     // loaded Sortformer model (four speakers for V2, eight for supported V3).
     bool enable_speaker_diarization;
     int32_t max_speaker_count;
+    const char* const* language_hints;
+    size_t language_hint_count;
+    float language_hint_penalty;
 } nemo_speech_asr_recognition_options;
-
-typedef struct nemo_speech_asr_language_hints {
-    size_t size;
-    const char* const* languages;
-    size_t count;
-    float penalty;
-} nemo_speech_asr_language_hints;
-
-NEMO_SPEECH_ASR_API nemo_speech_asr_status nemo_speech_asr_recognize_f32_with_language_hints(
-    nemo_speech_asr_recognizer* recognizer, const nemo_speech_asr_recognition_options* options,
-    const nemo_speech_asr_language_hints* hints, const float* samples, size_t n_samples,
-    int32_t sample_rate, nemo_speech_asr_result** out);
-
-NEMO_SPEECH_ASR_API nemo_speech_asr_status nemo_speech_asr_streaming_recognize_with_language_hints(
-    nemo_speech_asr_recognizer* recognizer, const nemo_speech_asr_recognition_options* options,
-    const nemo_speech_asr_language_hints* hints, nemo_speech_asr_stream** out);
 
 // Zero-initialized structs with `size` set to the current sizeof, holding the
 // library's defaults.
