@@ -10,6 +10,7 @@
  *
  * WAV must be 16 kHz mono 16-bit PCM (the test reads it as such).
  */
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -80,6 +81,43 @@ check_salm_config(void) {
     return 0;
 }
 
+static int
+check_language_hints(
+    nemo_speech_asr_recognizer* rec, const nemo_speech_asr_recognition_options* opt) {
+    const char* languages[] = {"en", "zh"};
+    const char* invalid[] = {"auto"};
+    const char* missing[] = {NULL};
+    const size_t size = sizeof(nemo_speech_asr_language_hints);
+    nemo_speech_asr_language_hints cases[] = {
+        {0, NULL, 0, 2},          {size, NULL, 1, 2},       {size, missing, 1, 2},
+        {size, invalid, 1, 2},    {size, languages, 2, -1}, {size, languages, 2, INFINITY},
+        {size, languages, 2, NAN}};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        nemo_speech_asr_stream* stream = NULL;
+        const nemo_speech_asr_status status =
+            nemo_speech_asr_streaming_recognize_with_language_hints(rec, opt, &cases[i], &stream);
+        if (status != NEMO_SPEECH_ASR_ERROR_INVALID_ARGUMENT || stream) {
+            fprintf(stderr, "invalid language hints case %zu accepted\n", i);
+            if (stream)
+                nemo_speech_asr_stream_close(stream);
+            return 1;
+        }
+    }
+    nemo_speech_asr_language_hints hints = {
+        offsetof(nemo_speech_asr_language_hints, penalty), languages, 2, 0};
+    nemo_speech_asr_stream* stream = NULL;
+    if (nemo_speech_asr_streaming_recognize_with_language_hints(rec, opt, &hints, &stream) !=
+        NEMO_SPEECH_ASR_OK) {
+        fprintf(
+            stderr, "language hints with default penalty failed: %s\n",
+            nemo_speech_asr_last_error());
+        return 1;
+    }
+    nemo_speech_asr_stream_close(stream);
+    printf("[language hints validation OK]\n");
+    return 0;
+}
+
 int
 main(int argc, char** argv) {
     printf("nemo_speech_asr_version: %s\n", nemo_speech_asr_version());
@@ -94,7 +132,8 @@ main(int argc, char** argv) {
         printf("[link/header/SALM config OK] pass MODEL WAV to run recognition\n");
         return 0;
     }
-    const char* salm_encoder = argc > 4 ? argv[4] : NULL;
+    const int use_hints = argc > 4 && strcmp(argv[4], "--language-hints") == 0;
+    const char* salm_encoder = argc > 4 && !use_hints ? argv[4] : NULL;
     const char* model = argv[1];
     const char* wav = argv[2];
 
@@ -144,10 +183,21 @@ main(int argc, char** argv) {
 
     nemo_speech_asr_recognition_options opt = nemo_speech_asr_recognition_options_default();
     opt.enable_word_time_offsets = salm_encoder == NULL; /* SALM timestamps need a CTC adapter */
+    const char* languages[] = {"en", "zh"};
+    const nemo_speech_asr_language_hints hints = {sizeof(hints), languages, 2, 2};
+    if (use_hints && check_language_hints(rec, &opt)) {
+        free(audio);
+        nemo_speech_asr_destroy(rec);
+        return 1;
+    }
 
     /* ---- offline ---- */
     nemo_speech_asr_result* r = NULL;
-    if (nemo_speech_asr_recognize_f32(rec, &opt, audio, n, 16000, &r) != NEMO_SPEECH_ASR_OK) {
+    const nemo_speech_asr_status offline_status =
+        use_hints ? nemo_speech_asr_recognize_f32_with_language_hints(
+                        rec, &opt, &hints, audio, n, 16000, &r)
+                  : nemo_speech_asr_recognize_f32(rec, &opt, audio, n, 16000, &r);
+    if (offline_status != NEMO_SPEECH_ASR_OK) {
         fprintf(stderr, "recognize failed: %s\n", nemo_speech_asr_last_error());
         free(audio);
         nemo_speech_asr_destroy(rec);
@@ -174,7 +224,10 @@ main(int argc, char** argv) {
 
     /* ---- streaming (160 ms chunks) ---- */
     nemo_speech_asr_stream* st = NULL;
-    if (nemo_speech_asr_streaming_recognize(rec, &opt, &st) != NEMO_SPEECH_ASR_OK) {
+    const nemo_speech_asr_status stream_status =
+        use_hints ? nemo_speech_asr_streaming_recognize_with_language_hints(rec, &opt, &hints, &st)
+                  : nemo_speech_asr_streaming_recognize(rec, &opt, &st);
+    if (stream_status != NEMO_SPEECH_ASR_OK) {
         fprintf(stderr, "stream_open failed: %s\n", nemo_speech_asr_last_error());
         free(audio);
         nemo_speech_asr_destroy(rec);

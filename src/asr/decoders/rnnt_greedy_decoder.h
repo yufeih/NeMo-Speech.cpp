@@ -230,7 +230,8 @@ class RnntGreedyDecoder : public Decoder {
     float bias_alpha_cfg_ = 1.0f;
     float bias_eff_alpha_ = 1.0f;  // effective alpha for the current request
     float bias_depth_scaling_ = 2.0f;
-    double bias_max_boost_ = 5.0;           // greedy-safe upper clamp on the request boost
+    double bias_max_boost_ = 5.0;  // greedy-safe upper clamp on the request boost
+    std::vector<float> language_bias_;
     std::vector<float> bias_scratch_;       // dense per-round joint-logit bias
     std::vector<int32_t> boost_token_ids_;  // blank-excluded re-rank pass output
 };

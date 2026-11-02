@@ -33,6 +33,8 @@ struct AsrRequestOptions {
     // prompt language here so final postprocessing can select the same ITN
     // grammar (or the model-detected language when this is "auto").
     std::string language_code;
+    std::vector<std::string> language_hints;
+    float language_hint_penalty = 2.0f;
     // Maximum ranked hypotheses; greedy decoders always return one.
     int max_alternatives = 1;
     bool enable_word_time_offsets = false;

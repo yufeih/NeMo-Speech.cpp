@@ -12,10 +12,12 @@
 //   bound_word_frames  end-of-stream flush words stay on real frames.
 //
 // Usage: ./test_decoders   (no model files, no GPU)
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -296,6 +298,11 @@ class MockRnntEngine : public RnntEngine {
     const RnntConfig& rnnt_config() const override { return cfg_; }
     const std::vector<std::string>& vocab() const override { return vocab_; }
     void set_piece(int id, const std::string& text) { vocab_.at(id) = text; }
+    std::vector<int> encode_phrase(const std::string& text) const override {
+        if (text == "hello")
+            return {0};
+        return {};
+    }
 
     struct State : RnntStreamState {
         float bank[2] = {0.0f, 0.0f};
@@ -324,6 +331,17 @@ class MockRnntEngine : public RnntEngine {
         } else {
             last_logit_bias.clear();
         }
+        if (!logits.empty()) {
+            int best = 0;
+            for (int j = 1; j < cfg_.vocab_size; ++j) {
+                const float score = logits[j] + (logit_bias ? logit_bias[j] : 0.0f);
+                const float current = logits[best] + (logit_bias ? logit_bias[best] : 0.0f);
+                if (score > current)
+                    best = j;
+            }
+            std::fill(token_ids, token_ids + T, best);
+            return;
+        }
         std::vector<int> round;
         if (!rounds.empty()) {
             round = std::move(rounds.front());
@@ -345,11 +363,133 @@ class MockRnntEngine : public RnntEngine {
     int predictor_calls = 0;
     int joint_calls = 0;
     std::vector<float> last_logit_bias;
+    std::vector<float> logits;
 
    private:
     RnntConfig cfg_;
     std::vector<std::string> vocab_;
 };
+
+void
+test_rnnt_language_hints() {
+    MockRnntEngine eng;
+    eng.set_piece(0, "hello");
+    eng.set_piece(1, "\xe4\xb8\xad");
+    eng.set_piece(2, "\xd0\xb4");
+    eng.set_piece(3, "123!?\xe2\x96\x81");
+    RnntGreedyDecoder dec(&eng);
+    AsrRequestOptions opts;
+    opts.language_hints = {"EN-us", "zh_CN"};
+    dec.set_request_options(opts);
+    float frame[4] = {};
+    const auto run = [&] {
+        eng.rounds = {{eng.rnnt_config().blank_id}, {0}};
+        const auto ids = dec.step(frame, 4, 1, 0);
+        check(ids.empty(), "language hints preserve the unmodified blank decision");
+    };
+    run();
+    check(eng.last_logit_bias.size() == 5, "language hints reach the joint network");
+    check(
+        eng.last_logit_bias[0] == 0 && eng.last_logit_bias[1] == 0,
+        "English and Chinese remain available together");
+    check(eng.last_logit_bias[2] == -2.0f, "unselected Cyrillic receives a soft penalty");
+    check(eng.last_logit_bias[3] == 0, "numbers punctuation and word boundaries remain neutral");
+    eng.set_piece(3, "<ru-RU>");
+    opts.language_hint_penalty = 3.5f;
+    dec.set_request_options(opts);
+    run();
+    check(
+        eng.last_logit_bias[2] == -3.5f && eng.last_logit_bias[3] == 0,
+        "penalty is configurable and special tokens remain neutral");
+    opts.language_hint_penalty = 2;
+    opts.speech_contexts = {{{"hello"}, 1}};
+    dec.set_request_options(opts);
+    run();
+    check(
+        eng.last_logit_bias[0] > 0 && eng.last_logit_bias[2] == -2,
+        "word boosting and language penalties compose");
+    opts.speech_contexts.clear();
+    opts.language_hint_penalty = 3.5f;
+    opts.language_hints = {"ru"};
+    dec.set_request_options(opts);
+    run();
+    check(
+        eng.last_logit_bias[0] == -3.5f && eng.last_logit_bias[2] == 0,
+        "new request replaces previous language preferences");
+    opts.language_hint_penalty = 0;
+    dec.set_request_options(opts);
+    eng.rounds = {{eng.rnnt_config().blank_id}};
+    dec.step(frame, 4, 1, 0);
+    check(eng.last_logit_bias.empty(), "zero penalty disables hints");
+    dec.set_request_options(AsrRequestOptions{});
+    eng.rounds = {{eng.rnnt_config().blank_id}};
+    dec.step(frame, 4, 1, 0);
+    check(eng.last_logit_bias.empty(), "empty hints restore the original decoder path");
+    for (const auto& language : {"auto", "", "unsupported"}) {
+        opts.language_hints = {language};
+        bool rejected = false;
+        try {
+            dec.set_request_options(opts);
+        }
+        catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "invalid language hints fail explicitly");
+    }
+    opts.language_hints = {"en", "zh"};
+    opts.language_hint_penalty = 2;
+    dec.set_request_options(opts);
+    eng.logits = {4, 3, 5, 0, -10};
+    dec.reset();
+    check(
+        dec.step(frame, 4, 1, 0) == std::vector<int>({0, 0, 0}),
+        "language penalty changes actual emission from Cyrillic to English");
+    eng.logits = {3, 4, 5, 0, -10};
+    dec.reset();
+    check(
+        dec.step(frame, 4, 1, 0) == std::vector<int>({1, 1, 1}),
+        "Chinese remains selectable in the same hinted request");
+    dec.set_request_options(AsrRequestOptions{});
+    dec.reset();
+    check(
+        dec.step(frame, 4, 1, 0) == std::vector<int>({2, 2, 2}),
+        "no hints preserve the original winning token");
+    eng.logits.clear();
+    opts.language_hint_penalty = 2;
+    for (const auto& entry : std::vector<std::pair<std::string, std::string>>{
+             {"en", "hello"},
+             {"zh", "\xe4\xb8\xad"},
+             {"ja", "\xe3\x81\x82"},
+             {"ko", "\xed\x95\x9c"},
+             {"ru", "\xd0\xb4"},
+             {"ar", "\xd8\xa8"},
+             {"hi", "\xe0\xa4\x95"},
+             {"el", "\xce\xb1"},
+             {"he", "\xd7\x90"},
+             {"th", "\xe0\xb8\x81"}}) {
+        eng.set_piece(1, entry.second);
+        opts.language_hints = {entry.first};
+        dec.set_request_options(opts);
+        run();
+        check(eng.last_logit_bias[1] == 0, "each supported script remains available when selected");
+        opts.language_hints = {entry.first == "en" ? "zh" : "en"};
+        dec.set_request_options(opts);
+        run();
+        check(eng.last_logit_bias[1] == -2, "unselected scripts receive the configured penalty");
+    }
+    opts.language_hints = {"en"};
+    for (float penalty : {-1.0f, std::numeric_limits<float>::infinity(), std::nanf("")}) {
+        opts.language_hint_penalty = penalty;
+        bool rejected = false;
+        try {
+            dec.set_request_options(opts);
+        }
+        catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "negative and nonfinite penalties fail explicitly");
+    }
+}
 
 void
 test_rnnt_emission_and_blank() {
@@ -922,6 +1062,7 @@ main() {
     test_greedy_punctuation_word_timing();
     test_greedy_reset_utterance_vs_reset();
     test_greedy_open_word_needs_finalize();
+    test_rnnt_language_hints();
     test_rnnt_emission_and_blank();
     test_rnnt_max_symbols_cap();
     test_rnnt_finalization_preserves_native_punctuation();

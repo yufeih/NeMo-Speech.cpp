@@ -450,6 +450,9 @@ RecognitionStream::RecognitionStream(
     bool coordinate_ingress)
     : recognizer_(recognizer), runner_(std::move(runner)), opts_(std::move(opts)),
       coordinate_ingress_(coordinate_ingress) {
+    if (!opts_.language_hints.empty() &&
+        (!recognizer_->model() || recognizer_->model()->head_kind() != HeadKind::Rnnt))
+        throw std::invalid_argument("language hints require an RNNT model");
     runner_->set_request_options(opts_);
     if (opts_.enable_speaker_diarization) {
         if (recognizer_->diar_model() == nullptr) {

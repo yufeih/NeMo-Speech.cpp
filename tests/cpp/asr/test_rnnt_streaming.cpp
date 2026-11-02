@@ -42,6 +42,7 @@ main(int argc, char** argv) {
     int chunk_ms = 160;
     int right_ctx = 1;
     std::string language;
+    AsrRequestOptions options;
     std::string dump_encoder_path;
     for (int i = 3; i < argc; i++) {
         std::string a = argv[i];
@@ -53,6 +54,8 @@ main(int argc, char** argv) {
             right_ctx = std::atoi(argv[++i]);
         else if (a == "--language" && i + 1 < argc)
             language = argv[++i];
+        else if (a == "--language-hint" && i + 1 < argc)
+            options.language_hints.emplace_back(argv[++i]);
         else if (a == "--dump-encoder" && i + 1 < argc)
             dump_encoder_path = argv[++i];
     }
@@ -86,6 +89,7 @@ main(int argc, char** argv) {
     RecognizerConfig cfg;
     cfg.streaming.rnnt_right_context = right_ctx;
     CacheStreamRunner runner(rnnt, cfg);
+    runner.set_request_options(options);
     runner.set_prompt_index(rnnt->prompt_index_for_lang(language));
 
     // Diagnostic: feed all audio in one shot, then inspect one encoder chunk

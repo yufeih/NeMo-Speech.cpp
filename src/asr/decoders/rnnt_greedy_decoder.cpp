@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -29,6 +30,115 @@ class DecodeStepScope {
 }  // namespace
 
 namespace {
+enum Script : unsigned {
+    Latin = 1u << 0,
+    Han = 1u << 1,
+    Kana = 1u << 2,
+    Hangul = 1u << 3,
+    Cyrillic = 1u << 4,
+    Arabic = 1u << 5,
+    Devanagari = 1u << 6,
+    Greek = 1u << 7,
+    Hebrew = 1u << 8,
+    Thai = 1u << 9,
+};
+
+unsigned
+language_script(std::string language) {
+    language = language.substr(0, language.find_first_of("-_"));
+    std::transform(language.begin(), language.end(), language.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (language == "zh")
+        return Han;
+    if (language == "ja")
+        return Han | Kana;
+    if (language == "ko")
+        return Hangul;
+    if (language == "ru" || language == "uk" || language == "bg")
+        return Cyrillic;
+    if (language == "ar")
+        return Arabic;
+    if (language == "hi")
+        return Devanagari;
+    if (language == "el")
+        return Greek;
+    if (language == "he")
+        return Hebrew;
+    if (language == "th")
+        return Thai;
+    const std::string latin =
+        " en es de fr it pt vi nl cs da pl no nb nn sv tr et fi hr hu lt lv ro sk mt sl ";
+    if (!language.empty() && latin.find(" " + language + " ") != std::string::npos)
+        return Latin;
+    throw std::invalid_argument("unsupported language hint: " + language);
+}
+
+unsigned
+character_script(uint32_t c) {
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= 0x00c0 && c <= 0x02af && c != 0x00d7 && c != 0x00f7) || (c >= 0x1e00 && c <= 0x1eff))
+        return Latin;
+    if ((c >= 0x3400 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0x9fff) ||
+        (c >= 0xf900 && c <= 0xfaff) || (c >= 0x20000 && c <= 0x323af))
+        return Han;
+    if ((c >= 0x3041 && c <= 0x3096) || (c >= 0x30a1 && c <= 0x30fa) ||
+        (c >= 0xff66 && c <= 0xff9d))
+        return Kana;
+    if ((c >= 0x1100 && c <= 0x11ff) || (c >= 0x3131 && c <= 0x318e) ||
+        (c >= 0xac00 && c <= 0xd7a3))
+        return Hangul;
+    if ((c >= 0x0400 && c <= 0x0481) || (c >= 0x048a && c <= 0x052f))
+        return Cyrillic;
+    if ((c >= 0x0620 && c <= 0x064a) || (c >= 0x066e && c <= 0x06d3) ||
+        ((c >= 0xfb50 && c <= 0xfd3d) || (c >= 0xfd50 && c <= 0xfdfb)) ||
+        (c >= 0xfe70 && c <= 0xfefc))
+        return Arabic;
+    if (c >= 0x0904 && c <= 0x0939)
+        return Devanagari;
+    if (c >= 0x0370 && c <= 0x03ff && c != 0x037e && c != 0x0384 && c != 0x0385 && c != 0x0387 &&
+        c != 0x03f6)
+        return Greek;
+    if (c >= 0x05d0 && c <= 0x05ea)
+        return Hebrew;
+    if (c >= 0x0e01 && c <= 0x0e2e)
+        return Thai;
+    return 0;
+}
+
+bool
+outside_scripts(const std::string& piece, unsigned allowed) {
+    if (piece.empty() || piece.front() == '<')
+        return false;
+    unsigned scripts = 0;
+    for (size_t i = 0; i < piece.size();) {
+        const auto first = static_cast<unsigned char>(piece[i++]);
+        uint32_t c = first;
+        int remaining = 0;
+        if (first >= 0xc2 && first <= 0xdf) {
+            c &= 0x1f;
+            remaining = 1;
+        } else if (first >= 0xe0 && first <= 0xef) {
+            c &= 0x0f;
+            remaining = 2;
+        } else if (first >= 0xf0 && first <= 0xf4) {
+            c &= 0x07;
+            remaining = 3;
+        } else if (first >= 0x80)
+            return false;
+        while (remaining--) {
+            if (i == piece.size())
+                return false;
+            const auto next = static_cast<unsigned char>(piece[i++]);
+            if ((next & 0xc0) != 0x80)
+                return false;
+            c = (c << 6) | (next & 0x3f);
+        }
+        scripts |= character_script(c);
+    }
+    return (scripts & ~allowed) != 0;
+}
+
 // Riva treats phrases matching ^\$[A-Z_]+$ as class hints (e.g. "$NAME"), not
 // literal boost phrases; skip them like parse_riva_speech_contexts does.
 bool
@@ -57,6 +167,19 @@ RnntGreedyDecoder::RnntGreedyDecoder(RnntEngine* engine, const DecoderConfig& cf
 void
 RnntGreedyDecoder::set_request_options(const AsrRequestOptions& opts) {
     set_compute_timestamps(opts.needs_word_timings());
+    language_bias_.clear();
+    if (!std::isfinite(opts.language_hint_penalty) || opts.language_hint_penalty < 0.0f)
+        throw std::invalid_argument("language_hint_penalty must be finite and nonnegative");
+    unsigned scripts = 0;
+    for (const auto& language : opts.language_hints) scripts |= language_script(language);
+    if (scripts && opts.language_hint_penalty > 0.0f) {
+        const auto& vocab = engine_->vocab();
+        const auto& cfg = engine_->rnnt_config();
+        language_bias_.assign(static_cast<size_t>(cfg.vocab_size), 0.0f);
+        for (size_t i = 0; i < vocab.size() && i < language_bias_.size(); ++i)
+            if (static_cast<int>(i) != cfg.blank_id && outside_scripts(vocab[i], scripts))
+                language_bias_[i] = -opts.language_hint_penalty;
+    }
     bias_on_ = false;
     bias_node_ = ContextBiasingTree::kRoot;
     bias_eff_alpha_ = 1.0f;
@@ -245,7 +368,7 @@ RnntGreedyDecoder::step_impl(
     while (t < T) {
         const int remaining = T - t;
         const float* boost_bias = nullptr;
-        if (bias_on_) {
+        if (bias_on_ || !language_bias_.empty()) {
             // NeMo/riva semantics (rnnt_label_looping.py): blank vs non-blank is
             // decided on the unboosted logits; boosting only re-ranks which
             // non-blank label wins. Build a second bias for a blank-excluded
@@ -255,7 +378,10 @@ RnntGreedyDecoder::step_impl(
             // frame run: the match state only changes on a non-blank commit,
             // which starts a fresh round.
             const ContextBiasingTree::StepBoost sb = bias_tree_.step_boost(bias_node_);
-            bias_scratch_.assign(static_cast<size_t>(cfg.vocab_size), 0.0f);
+            if (language_bias_.empty())
+                bias_scratch_.assign(static_cast<size_t>(cfg.vocab_size), 0.0f);
+            else
+                bias_scratch_ = language_bias_;
             for (const auto& sp : sb.specials) {
                 if (sp.first != blank_id && sp.first >= 0 && sp.first < cfg.vocab_size)
                     bias_scratch_[static_cast<size_t>(sp.first)] +=
